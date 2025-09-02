@@ -287,12 +287,21 @@ export const PHOTOGRAPHIC_DIRECTIONS = {
         { name: 'Wet Plate Collodion Photo', prompt: 'an antique wet plate collodion photograph, with its characteristic ethereal quality and imperfections.' }
     ]
 };
-export const GENERATIVE_FILL_PRESETS = {
+export const EDIT_PRESETS = {
   Lighting: [ "Golden Hour", "Studio Lighting", "Neon Glow", "Cinematic Lighting" ],
   "Time of Day": [ "Sunrise", "Midday Sun", "Sunset", "Night Time" ],
 };
+// Update and expand the ANIMATION_PRESETS array with more product-focused presets.
 export const ANIMATION_PRESETS = [
-    { name: 'Subtle Ambiance', prompt: 'Create a subtle ambiance with gentle motion in the background (e.g., steam rising, leaves rustling, clouds drifting).' },
-    { name: 'Product Spotlight', prompt: 'Create a slow, elegant 360-degree rotation of the product.' },
-    { name: '3D Photo Parallax', prompt: 'Generate a subtle 3D parallax camera pan effect, giving the image a sense of depth.' },
+    { name: 'Subtle Ambiance', prompt: 'Create a subtle ambiance with gentle, natural motion in the background (e.g., steam rising, leaves rustling, clouds drifting), keeping the product static.' },
+    { name: 'Gentle Zoom In', prompt: 'A subtle, slow, and smooth zoom-in on the product, keeping it perfectly centered.' },
+    { name: 'Gentle Zoom Out', prompt: 'A subtle, slow, and smooth zoom-out from the product, revealing more of the surrounding scene.' },
+    { name: 'Slow Pan Right', prompt: 'A slow, smooth camera pan from left to right across the image.' },
+    { name: 'Slow Pan Left', prompt: 'A slow, smooth camera pan from right to left across the image.' },
+    { name: 'Slow Pan Up', prompt: 'A slow, smooth camera tilt upwards across the image.' },
+    { name: 'Slow Pan Down', prompt: 'A slow, smooth camera tilt downwards across the image.' },
+    { name: '180° Orbit', prompt: 'A smooth camera movement orbiting 180 degrees around the product to showcase its sides.' },
+    { name: '360° Turntable', prompt: 'A seamless 360-degree turntable rotation of the product, showcasing all angles.' },
+    { name: 'Creative Ambiance', prompt: 'Bring the scene to life with creative, magical ambient effects like sparkling particles, gentle light rays, or shimmering water reflections.' },
+    { name: 'Static Wallpaper', prompt: 'A completely static, non-moving shot of the image, like a cinemagraph with absolutely no motion.' },
 ];

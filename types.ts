@@ -17,7 +17,7 @@ export interface ProductImage {
   mimeType: string;
   processedData?: string;
   isProcessed?: boolean;
-  palette?: string[];
+  palette: string[];
 }
 
 export interface SelectedBackground {

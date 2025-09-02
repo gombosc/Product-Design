@@ -6,7 +6,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { GoogleGenAI, Modality, Part, Type } from "@google/genai";
-import { VISUAL_STYLES, CUSTOM_BACKGROUNDS, PHOTOGRAPHIC_DIRECTIONS, GENERATIVE_FILL_PRESETS, ANIMATION_PRESETS } from './constants';
+import { VISUAL_STYLES, CUSTOM_BACKGROUNDS, PHOTOGRAPHIC_DIRECTIONS, EDIT_PRESETS, ANIMATION_PRESETS } from './constants';
 import type { ProductImage, SelectedBackground, GeneratedImage, Preset, Project, VisualStyle, DirectionCategory } from './types';
 
 
@@ -45,7 +45,6 @@ const App = () => {
   const [error, setError] = useState<string | null>(null);
   const [fullPreviewImage, setFullPreviewImage] = useState<GeneratedImage | null>(null);
   const [expandedReviewItem, setExpandedReviewItem] = useState<string | null>(null);
-  const [shareData, setShareData] = useState<{ name: string; images: GeneratedImage[] } | null>(null);
 
   // Loading State
   const [isUploading, setIsUploading] = useState(false);
@@ -53,32 +52,26 @@ const App = () => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [upscalingId, setUpscalingId] = useState<string | null>(null);
   const [variationsLoadingId, setVariationsLoadingId] = useState<string | null>(null);
-  const [isGeneratingFill, setIsGeneratingFill] = useState(false);
-  const [isGeneratingVariation, setIsGeneratingVariation] = useState(false);
+  const [isReimagining, setIsReimagining] = useState(false);
   const [isUncropping, setIsUncropping] = useState(false);
   const [isGeneratingIdeaFor, setIsGeneratingIdeaFor] = useState<string | null>(null);
-  const [isGeneratingDetailedPrompt, setIsGeneratingDetailedPrompt] = useState(false);
   
   // Advanced Features State
   const [presets, setPresets] = useState<Preset[]>([]);
   const [presetName, setPresetName] = useState('');
   const [showProjectsModal, setShowProjectsModal] = useState(false);
   const [editingImage, setEditingImage] = useState<GeneratedImage | null>(null);
-  const [generativeFillPrompt, setGenerativeFillPrompt] = useState("");
-  const [imageAdjustments, setImageAdjustments] = useState({
-    brightness: 0,
-    contrast: 0,
-    saturation: 0,
-  });
-  const [uncropAspectRatio, setUncropAspectRatio] = useState("1:1");
-  const [maskCanvas, setMaskCanvas] = useState<HTMLCanvasElement | null>(null);
-  const [brushSize, setBrushSize] = useState(40);
-  const [isErasing, setIsErasing] = useState(false);
-  const [zoomLevel, setZoomLevel] = useState(1);
+  const [reimaginePrompt, setReimaginePrompt] = useState("");
+  const [imageAdjustments, setImageAdjustments] = useState({ brightness: 100, contrast: 100, saturation: 100 });
+  const [outpaintScale, setOutpaintScale] = useState(100);
+  const [previewZoom, setPreviewZoom] = useState(1);
   const [showPromptGenerator, setShowPromptGenerator] = useState(false);
   const [promptGeneratorImage, setPromptGeneratorImage] = useState<GeneratedImage | null>(null);
   const [generatedPrompt, setGeneratedPrompt] = useState("");
+  const [generatedPromptJSON, setGeneratedPromptJSON] = useState<string | null>(null);
   const [isGeneratingPrompt, setIsGeneratingPrompt] = useState(false);
+  const [promptType, setPromptType] = useState<'text' | 'video'>('text');
+  const [promptView, setPromptView] = useState<'text' | 'json'>('text');
   const [showAnimationModal, setShowAnimationModal] = useState(false);
   const [animatingImage, setAnimatingImage] = useState<GeneratedImage | null>(null);
   const [animationPrompt, setAnimationPrompt] = useState("");
@@ -88,7 +81,6 @@ const App = () => {
   // Refs
   const carouselRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const editImageRef = useRef<HTMLImageElement>(null);
 
   // --- DATA MANAGEMENT ---
 
@@ -176,19 +168,36 @@ const App = () => {
 
 }, [activeProjectId, projects]);
 
-  const fileToGenerativePart = async (file: File) => {
-    const base64 = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve((reader.result as string).split(',')[1]);
-      reader.onerror = (error) => reject(error);
-      reader.readAsDataURL(file);
+  const extractColorPalette = (dataUrl: string): Promise<string[]> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.src = dataUrl;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width; canvas.height = img.height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return resolve([]);
+        
+        ctx.drawImage(img, 0, 0);
+        const imageData = ctx.getImageData(0, 0, img.width, img.height).data;
+        const colorCount: { [key: string]: number } = {};
+        
+        for (let i = 0; i < imageData.length; i += 4 * 100) { 
+          const r_q = Math.round(imageData[i] / 32) * 32;
+          const g_q = Math.round(imageData[i + 1] / 32) * 32;
+          const b_q = Math.round(imageData[i + 2] / 32) * 32;
+          if (r_q + g_q + b_q < 700 && r_q + g_q + b_q > 50) {
+             const rgb = `${r_q},${g_q},${b_q}`;
+             colorCount[rgb] = (colorCount[rgb] || 0) + 1;
+          }
+        }
+        
+        const sortedColors = Object.keys(colorCount).sort((a, b) => colorCount[b] - colorCount[a]);
+        const palette = sortedColors.slice(0, 5).map(rgb => `rgb(${rgb})`);
+        resolve(palette);
+      };
+      img.onerror = () => resolve([]);
     });
-    return {
-      inlineData: {
-        mimeType: file.type,
-        data: base64,
-      },
-    };
   };
 
   const sanitizeForFilename = (text: string): string => {
@@ -217,11 +226,13 @@ const App = () => {
             reader.onerror = reject;
             reader.readAsDataURL(file);
           });
+          const palette = await extractColorPalette(data);
           return {
             id: `img-${Date.now()}-${Math.random()}`,
             originalName: file.name,
             data,
             mimeType: file.type,
+            palette,
           };
         })
       );
@@ -309,7 +320,7 @@ const App = () => {
     performProjectUpdate(project => ({
         ...project,
         productImages: project.productImages.map(img => 
-            img.isProcessed ? img : { ...img, isProcessed: true }
+            img.isProcessed ? img : { ...img, processedData: img.data, isProcessed: true }
         )
     }));
     setCurrentStep(3);
@@ -335,18 +346,14 @@ const App = () => {
       return { ...project, selectedBackgrounds: [...project.selectedBackgrounds, newBg] };
     });
     setCustomPrompt('');
+    setCurrentStep(5);
   }, [customPrompt, performProjectUpdate]);
 
   const handleBackgroundSelect = useCallback((bg: { name: string; prompt: string }) => {
     performProjectUpdate(project => {
         const existingBg = project.selectedBackgrounds.find(b => b.prompt === bg.prompt);
         if (existingBg) {
-          return {
-            ...project,
-            selectedBackgrounds: project.selectedBackgrounds.map(b =>
-              b.id === existingBg.id ? { ...b, count: b.count + 1 } : b
-            ),
-          };
+          return project;
         } else {
           const newBg = {
             id: `bg-${Date.now()}`,
@@ -360,6 +367,7 @@ const App = () => {
           return { ...project, selectedBackgrounds: [...project.selectedBackgrounds, newBg] };
         }
       });
+      setCurrentStep(5);
   }, [performProjectUpdate]);
 
   const handleBackgroundCountChange = useCallback((id: string, delta: number) => {
@@ -372,15 +380,32 @@ const App = () => {
   }, [performProjectUpdate]);
 
   const handleRemoveBackground = useCallback((id: string) => {
-    performProjectUpdate(project => ({
-      ...project,
-      selectedBackgrounds: project.selectedBackgrounds.filter(bg => bg.id !== id),
-    }));
-  }, [performProjectUpdate]);
+    performProjectUpdate(project => {
+        const updatedBgs = project.selectedBackgrounds.filter(bg => bg.id !== id);
+        if (project.selectedBackgrounds.length > 0 && updatedBgs.length === 0) {
+            setCurrentStep(4);
+        }
+        return {
+            ...project,
+            selectedBackgrounds: updatedBgs,
+        };
+    });
+}, [performProjectUpdate]);
   
   const handleClearBackgrounds = useCallback(() => {
     performProjectUpdate(project => ({ ...project, selectedBackgrounds: [] }));
+    setCurrentStep(4);
   }, [performProjectUpdate]);
+
+  const handleChangeStyle = () => {
+    if (activeProject?.selectedBackgrounds.length > 0 || activeProject?.generatedImages.length > 0) {
+        if (!window.confirm('Changing style will clear your selected backgrounds and results. Are you sure?')) {
+            return;
+        }
+    }
+    performProjectUpdate(p => ({ ...p, selectedStyle: null, selectedBackgrounds: [], generatedImages: [] }));
+    setCurrentStep(3);
+  };
 
   const handleUpdateDirections = useCallback((bgId: string, category: DirectionCategory, value: string | null) => {
     performProjectUpdate(project => ({
@@ -427,20 +452,23 @@ const App = () => {
     try {
       const allGenerationPromises = imagesToGenerate.flatMap(image =>
         selectedBackgrounds.flatMap(background => {
-          const fullPrompt = [
-            selectedStyle.prompt,
-            background.prompt,
-            ...Object.values(background.directions).filter(Boolean),
-            background.negativePrompt ? `avoiding: ${background.negativePrompt}` : '',
-          ].join(', ');
           
-          const hasTransparentBg = !!image.processedData;
+          let promptParts = [`INSTRUCTION: Take the product from the provided image and place it in a new scene.`];
+          promptParts.push(`SCENE: ${background.prompt}`);
+          promptParts.push(`STYLE: ${selectedStyle.prompt}`);
+          const directionPrompts = Object.values(background.directions).filter(Boolean).join(', ');
+          if (directionPrompts) promptParts.push(`DIRECTIONS: ${directionPrompts}`);
+          if (background.matchPalette && image.palette && image.palette.length > 0) {
+            promptParts.push(`HARMONIZE COLORS: Ensure the background scenery and lighting complement the product's primary colors. Product color palette: [${image.palette.join(', ')}].`);
+          }
+          if (background.negativePrompt?.trim()) {
+            promptParts.push(`NEGATIVE PROMPT: DO NOT include the following elements: ${background.negativePrompt.trim()}.`);
+          }
+      
+          const fullPrompt = promptParts.join('\n');
+          
           const imageData = (image.processedData || image.data).split(',')[1];
-          const imageMimeType = hasTransparentBg ? 'image/png' : image.mimeType;
-
-          const generationPrompt = hasTransparentBg
-            ? `Place the product from the image into the following scene, maintaining the product's appearance: ${fullPrompt}. The product has a transparent background.`
-            : `Integrate the main product from the provided image into a new scene described as: ${fullPrompt}. The product should be realistically placed within the new background, replacing its original surroundings.`;
+          const imageMimeType = image.mimeType;
 
           return Array.from({ length: background.count }, (_, i) =>
             ai.models.generateContent({
@@ -448,14 +476,9 @@ const App = () => {
                 contents: {
                   parts: [
                     {
-                      inlineData: {
-                        data: imageData,
-                        mimeType: imageMimeType
-                      }
+                      inlineData: { data: imageData, mimeType: imageMimeType }
                     },
-                    {
-                      text: generationPrompt
-                    }
+                    { text: fullPrompt }
                   ]
                 },
                 config: {
@@ -468,8 +491,8 @@ const App = () => {
                 return {
                   id: `gen-${Date.now()}-${Math.random()}`,
                   sourceId: image.id,
-                  data: `data:image/png;base64,${imagePart.inlineData.data}`,
-                  mimeType: 'image/png',
+                  data: `data:${imagePart.inlineData.mimeType};base64,${imagePart.inlineData.data}`,
+                  mimeType: imagePart.inlineData.mimeType,
                   prompt: fullPrompt,
                   backgroundName: background.name,
                 };
@@ -531,8 +554,9 @@ const App = () => {
     const project = projects.find(p => p.id === projectId);
     if (project) {
         if (project.generatedImages.length > 0) setCurrentStep(5);
-        else if (project.selectedBackgrounds.length > 0) setCurrentStep(4);
+        else if (project.selectedBackgrounds.length > 0) setCurrentStep(5);
         else if (project.selectedStyle) setCurrentStep(4);
+        else if (project.productImages.some(img => img.isProcessed)) setCurrentStep(3);
         else if (project.productImages.length > 0) setCurrentStep(2);
         else setCurrentStep(1);
     }
@@ -553,31 +577,27 @@ const App = () => {
     const image = generatedImages.find(img => img.id === imageId);
     if (!image) return;
 
-    // Simulate upscaling as this model doesn't have a native upscale feature
-    // We'll regenerate at a potentially higher quality setting
     try {
-        const response = await ai.models.generateImages({
-            model: 'imagen-4.0-generate-001',
-            prompt: image.prompt + ', 4k, high resolution, photorealistic',
-            config: {
-                numberOfImages: 1,
-                outputMimeType: 'image/jpeg',
-            },
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash-image-preview',
+            contents: { parts: [{ inlineData: { data: image.data.split(',')[1], mimeType: image.mimeType } }, { text: "Upscale this image to a higher resolution, enhancing details and clarity without changing the content or style." }] },
+            config: { responseModalities: [Modality.IMAGE] },
         });
-
-      if (response.generatedImages && response.generatedImages.length > 0) {
-        const upscaledImage = response.generatedImages[0];
-        const newData = `data:image/jpeg;base64,${upscaledImage.image.imageBytes}`;
-        performProjectUpdate(project => ({
-          ...project,
-          generatedImages: project.generatedImages.map(img =>
-            img.id === imageId ? { ...img, data: newData, prompt: image.prompt + ', 4k, high resolution, photorealistic' } : img
-          ),
-        }));
-      }
-    } catch (error) {
+        const newImagePart = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+        if (newImagePart?.inlineData) {
+            const upscaledData = `data:${newImagePart.inlineData.mimeType};base64,${newImagePart.inlineData.data}`;
+            performProjectUpdate(project => ({
+                ...project,
+                generatedImages: project.generatedImages.map(img =>
+                  img.id === imageId ? { ...img, data: upscaledData, mimeType: newImagePart.inlineData.mimeType } : img
+                ),
+              }));
+        } else {
+            throw new Error("Upscale failed: Model did not return an image.");
+        }
+    } catch (error: any) {
         console.error("Upscale failed", error);
-        setError("Failed to upscale image.");
+        setError(error.message || "Failed to upscale image.");
     } finally {
         setUpscalingId(null);
     }
@@ -587,38 +607,65 @@ const App = () => {
     setVariationsLoadingId(imageId);
     const image = generatedImages.find(img => img.id === imageId);
     if (!image) return;
-  
+
     try {
-        const response = await ai.models.generateImages({
-            model: 'imagen-4.0-generate-001',
-            prompt: image.prompt,
-            config: {
-                numberOfImages: 4,
-                outputMimeType: 'image/jpeg',
-            },
-        });
-  
-      if (response.generatedImages && response.generatedImages.length > 0) {
-        const newVariations: GeneratedImage[] = response.generatedImages.map(genImg => ({
-          id: `gen-${Date.now()}-${Math.random()}`,
-          sourceId: image.sourceId,
-          data: `data:image/jpeg;base64,${genImg.image.imageBytes}`,
-          mimeType: 'image/jpeg',
-          prompt: image.prompt,
-          backgroundName: image.backgroundName,
-        }));
-        performProjectUpdate(project => ({
-          ...project,
-          generatedImages: [...project.generatedImages, ...newVariations],
-        }));
-      }
+        const variationPromises = Array.from({ length: 4 }).map(() =>
+            ai.models.generateContent({
+                model: 'gemini-2.5-flash-image-preview',
+                contents: {
+                    parts: [
+                        {
+                            inlineData: {
+                                data: image.data.split(',')[1],
+                                mimeType: image.mimeType,
+                            },
+                        },
+                        {
+                            text: `Generate a variation of this image, using the original prompt as inspiration: ${image.prompt}`,
+                        },
+                    ],
+                },
+                config: {
+                    responseModalities: [Modality.IMAGE],
+                },
+            })
+        );
+
+        const responses = await Promise.all(variationPromises);
+
+        const newVariations: GeneratedImage[] = responses
+            .map(response => {
+                const imagePart = response.candidates?.[0]?.content.parts.find(part => part.inlineData);
+                if (imagePart && imagePart.inlineData) {
+                    return {
+                        id: `gen-${Date.now()}-${Math.random()}`,
+                        sourceId: image.sourceId,
+                        data: `data:${imagePart.inlineData.mimeType};base64,${imagePart.inlineData.data}`,
+                        mimeType: imagePart.inlineData.mimeType,
+                        prompt: image.prompt,
+                        backgroundName: image.backgroundName,
+                    };
+                }
+                return null;
+            })
+            .filter((img): img is GeneratedImage => img !== null);
+
+        if (newVariations.length > 0) {
+            performProjectUpdate(project => ({
+                ...project,
+                generatedImages: [...project.generatedImages, ...newVariations],
+            }));
+        } else {
+            throw new Error('Variation generation returned no images.');
+        }
     } catch (error) {
-      console.error("Variation generation failed", error);
-      setError("Failed to generate variations.");
+        console.error('Variation generation failed', error);
+        setError('Failed to generate variations.');
     } finally {
-      setVariationsLoadingId(null);
+        setVariationsLoadingId(null);
     }
-  }, [generatedImages, performProjectUpdate]);
+}, [generatedImages, performProjectUpdate]);
+
 
   const handleDownloadImage = useCallback((image: GeneratedImage) => {
     if (!activeProject) return;
@@ -692,117 +739,114 @@ const App = () => {
     });
 }, [generatedImages, activeProject, productImages]);
 
-const handleEditWithPreset = useCallback(async (preset: string) => {
-    if (!editingImage) return;
-    setIsGeneratingFill(true);
-    setGenerativeFillPrompt(preset);
-    
+const handleReimagine = useCallback(async () => {
+    if (!editingImage || !reimaginePrompt.trim()) return;
+    setIsReimagining(true);
+    setError(null);
     try {
+      const imagePart = { inlineData: { data: editingImage.data.split(',')[1], mimeType: editingImage.mimeType } };
+      const textPart = { text: reimaginePrompt };
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image-preview',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                data: editingImage.data.split(',')[1],
-                mimeType: editingImage.mimeType,
-              },
-            },
-            { text: preset },
-          ],
-        },
-        config: {
-            responseModalities: [Modality.IMAGE],
-        },
+          model: 'gemini-2.5-flash-image-preview',
+          contents: { parts: [imagePart, textPart] },
+          config: { responseModalities: [Modality.IMAGE] },
       });
-
-      const imagePart = response.candidates?.[0]?.content.parts.find(part => part.inlineData);
-      if (imagePart && imagePart.inlineData) {
-        const editedData = `data:image/png;base64,${imagePart.inlineData.data}`;
-        performProjectUpdate(project => ({
-            ...project,
-            generatedImages: project.generatedImages.map(img =>
-                img.id === editingImage.id ? { ...img, data: editedData } : img
-            ),
-        }));
-        setEditingImage(prev => prev ? { ...prev, data: editedData } : null);
+      const newImagePart = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+      if (newImagePart?.inlineData) {
+        const newImageData = `data:${newImagePart.inlineData.mimeType};base64,${newImagePart.inlineData.data}`;
+        const newImageObject: GeneratedImage = {
+          ...editingImage,
+          data: newImageData,
+          mimeType: newImagePart.inlineData.mimeType,
+          prompt: reimaginePrompt,
+        };
+        setEditingImage(newImageObject);
+        performProjectUpdate(p => ({ ...p, generatedImages: p.generatedImages.map(img => img.id === newImageObject.id ? newImageObject : img) }));
+      } else {
+        throw new Error("Reimagine failed: The model did not return an image.");
       }
-    } catch (error) {
-      console.error("Generative fill failed", error);
-      setError("Failed to apply generative fill.");
+    } catch (e: any) {
+        setError(e.message);
     } finally {
-      setIsGeneratingFill(false);
+        setIsReimagining(false);
     }
-  }, [editingImage, performProjectUpdate]);
+  }, [editingImage, performProjectUpdate, reimaginePrompt]);
 
   const handleUncrop = useCallback(async () => {
-    if (!editingImage) return;
+    if (!editingImage || outpaintScale === 100) return;
     setIsUncropping(true);
-  
+    setError(null);
     try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image-preview',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                data: editingImage.data.split(',')[1],
-                mimeType: editingImage.mimeType,
-              },
-            },
-            { text: `Uncrop this image to a ${uncropAspectRatio} aspect ratio.` },
-          ],
-        },
-        config: {
-            responseModalities: [Modality.IMAGE],
-        },
-      });
-
-      const imagePart = response.candidates?.[0]?.content.parts.find(part => part.inlineData);
-      if (imagePart && imagePart.inlineData) {
-        const uncroppedData = `data:image/png;base64,${imagePart.inlineData.data}`;
-        performProjectUpdate(project => ({
-            ...project,
-            generatedImages: project.generatedImages.map(img =>
-                img.id === editingImage.id ? { ...img, data: uncroppedData } : img
-            ),
-        }));
-        setEditingImage(prev => prev ? { ...prev, data: uncroppedData } : null);
-      }
-    } catch (error) {
-      console.error("Uncrop failed", error);
-      setError("Failed to uncrop image.");
+        const imagePart = { inlineData: { data: editingImage.data.split(',')[1], mimeType: editingImage.mimeType } };
+        const expansionRatio = outpaintScale / 100;
+        const textPart = { text: `Expand the canvas of this image, keeping the original image perfectly centered and unchanged. Intelligently fill in the new surrounding area (outpainting) to create a larger, seamless background and scene. The final image should be approximately ${expansionRatio} times the size of the original.` };
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash-image-preview',
+            contents: { parts: [imagePart, textPart] },
+            config: { responseModalities: [Modality.IMAGE] },
+        });
+        const newImagePart = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+        if (newImagePart?.inlineData) {
+            const newImageData = `data:${newImagePart.inlineData.mimeType};base64,${newImagePart.inlineData.data}`;
+            const newImageObject = {
+                ...editingImage,
+                data: newImageData,
+                mimeType: newImagePart.inlineData.mimeType,
+            };
+            setEditingImage(newImageObject);
+            performProjectUpdate(p => ({ ...p, generatedImages: p.generatedImages.map(img => img.id === newImageObject.id ? newImageObject : img) }));
+            setOutpaintScale(100);
+        } else {
+            throw new Error("Uncrop failed: The AI model did not return an image.");
+        }
+    } catch (e: any) {
+        console.error(e);
+        setError(e.message || "An error occurred during the uncrop process.");
     } finally {
-      setIsUncropping(false);
+        setIsUncropping(false);
     }
-  }, [editingImage, uncropAspectRatio, performProjectUpdate]);
+  }, [editingImage, outpaintScale, performProjectUpdate]);
 
-  const handleGenerateDetailedPromptForImage = useCallback(async (image: GeneratedImage, type: 'short' | 'long') => {
-    setPromptGeneratorImage(image);
-    setShowPromptGenerator(true);
+  const handleGenerateDetailedPromptForImage = useCallback(async (image: GeneratedImage, type: 'text' | 'video') => {
     setIsGeneratingPrompt(true);
     setGeneratedPrompt("");
+    setGeneratedPromptJSON(null);
     try {
-        const prompt = type === 'short'
-            ? 'Describe this image in one sentence for a text-to-image model.'
-            : 'Describe this image in detail. Be specific about the subject, composition, lighting, and style. Write it as a prompt for a text-to-image model.';
+        const systemInstruction = type === 'text'
+            ? 'You are a creative assistant that describes images. Analyze the provided image and generate two things: 1) A ready-to-use, optimized text prompt for a text-to-image model. 2) A structured JSON object breaking down the key elements of the image.'
+            : 'You are a creative assistant that imagines video scenes from static images. Analyze the provided image and generate two things: 1) A ready-to-use, descriptive text prompt for a text-to-video model like Veo. 2) A structured JSON object breaking down the key elements of the potential video scene.';
         
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: {
-                  parts: [
-                    {
-                      inlineData: {
-                        data: image.data.split(',')[1],
-                        mimeType: image.mimeType,
-                      },
-                    },
-                    { text: prompt },
-                  ],
-                },
-              });
+        const userPrompt = 'Analyze the image and generate the prompt and structured JSON.';
 
-        setGeneratedPrompt(response.text.trim());
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: { parts: [ { inlineData: { data: image.data.split(',')[1], mimeType: image.mimeType, } }, { text: userPrompt }, ] },
+            config: {
+                systemInstruction,
+                responseMimeType: 'application/json',
+                responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                        text_prompt: { type: Type.STRING, description: "The final, ready-to-use prompt as a single string." },
+                        structured_prompt: {
+                          type: Type.OBJECT,
+                          properties: {
+                            subject: { type: Type.STRING, description: "The main subject of the image/scene." },
+                            scene_description: { type: Type.STRING, description: "A detailed description of the background and environment." },
+                            style: { type: Type.STRING, description: "The artistic or photographic style." },
+                            camera_details: { type: Type.STRING, description: type === 'video' ? "Describes camera movement, angle, and shot type for the video." : "Describes camera angle, shot type, and lens effects." },
+                            lighting: { type: Type.STRING, description: "A description of the lighting in the scene." },
+                          }
+                        }
+                      }
+                }
+            }
+        });
+
+        const parsedResponse = JSON.parse(response.text);
+        setGeneratedPrompt(parsedResponse.text_prompt || '');
+        setGeneratedPromptJSON(JSON.stringify(parsedResponse.structured_prompt || {}, null, 2));
+
     } catch (error) {
         console.error('Prompt generation failed', error);
         setError('Could not generate a prompt for this image.');
@@ -811,6 +855,13 @@ const handleEditWithPreset = useCallback(async (preset: string) => {
         setIsGeneratingPrompt(false);
     }
 }, []);
+
+  useEffect(() => {
+    if (showPromptGenerator && promptGeneratorImage) {
+      handleGenerateDetailedPromptForImage(promptGeneratorImage, promptType);
+    }
+  }, [promptType, showPromptGenerator, promptGeneratorImage, handleGenerateDetailedPromptForImage]);
+
 
   const handleAnimate = useCallback(async () => {
     if (!animatingImage) return;
@@ -868,6 +919,13 @@ const handleEditWithPreset = useCallback(async (preset: string) => {
     setShowAnimationModal(true);
   };
 
+  const handleOpenPromptGenerator = (image: GeneratedImage) => {
+    setPromptType('text'); // Reset to default tab
+    setPromptView('text'); // Reset to default view
+    setPromptGeneratorImage(image);
+    setShowPromptGenerator(true);
+  };
+
   const handleCarouselScroll = (direction: 'left' | 'right') => {
     if (carouselRef.current) {
       const scrollAmount = direction === 'left' ? -300 : 300;
@@ -906,6 +964,39 @@ const handleEditWithPreset = useCallback(async (preset: string) => {
       setIsGeneratingIdeaFor(null);
     }
   };
+
+  const handleSavePreset = () => {
+    if (!presetName.trim()) {
+      setError("Please enter a name for your preset.");
+      return;
+    }
+    const newPreset: Preset = { name: presetName, style: selectedStyle, backgrounds: selectedBackgrounds };
+    const updatedPresets = [...presets.filter(p => p.name !== presetName), newPreset];
+    setPresets(updatedPresets);
+    setPresetName('');
+  };
+
+  const handleApplyPreset = (preset: Preset) => {
+    performProjectUpdate(p => ({ ...p, selectedStyle: preset.style, selectedBackgrounds: preset.backgrounds }));
+  };
+  
+  const handleDeletePreset = (name: string) => {
+    const updatedPresets = presets.filter(p => p.name !== name);
+    setPresets(updatedPresets);
+  };
+
+  const handleCloseEditModal = () => {
+    setEditingImage(null);
+    setReimaginePrompt("");
+    setImageAdjustments({ brightness: 100, contrast: 100, saturation: 100 });
+    setOutpaintScale(100);
+    setPreviewZoom(1);
+  };
+  
+  const handleEditImage = (image: GeneratedImage) => {
+    handleCloseEditModal(); // Reset state before opening a new one
+    setEditingImage(image);
+  }
 
 
   // --- RENDER ---
@@ -969,7 +1060,7 @@ const handleEditWithPreset = useCallback(async (preset: string) => {
                 )}
             </div>
 
-            {productImages.length > 0 && (
+            {currentStep >= 2 && productImages.length > 0 && (
                 <div className="card">
                     <StepIndicator step={2} title="Process & Refine" active={currentStep >= 2}>
                         {productImages.some(img => !img.isProcessed) && (
@@ -992,37 +1083,38 @@ const handleEditWithPreset = useCallback(async (preset: string) => {
                             </>
                         )}
                     </StepIndicator>
-                    {currentStep >= 2 && (
-                        <div className="product-thumbnail-grid">
-                            {productImages.map(image => (
-                                <div key={image.id} className={`product-thumbnail ${image.isProcessed ? 'processed' : ''}`}>
-                                    <img src={image.processedData ?? image.data} alt={image.originalName} />
-                                    <button className="remove-thumbnail-button" onClick={(e) => {e.stopPropagation(); handleRemoveProductImage(image.id);}}>&times;</button>
-                                    {(isRemovingBackground === image.id || !image.isProcessed) && (
-                                        <div className="product-thumbnail-overlay">
-                                            {isRemovingBackground === image.id ? (
-                                                <>
-                                                    <div className="spinner-ui" style={{ borderTopColor: 'white', borderLeftColor: 'transparent', borderRightColor: 'transparent' }}></div>
-                                                    <span>Processing...</span>
-                                                </>
-                                            ) : (
-                                                <div className="thumbnail-actions">
-                                                    <button onClick={() => handleReprocessImage(image.id)}>Process</button>
-                                                </div>
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-                            ))}
-                        </div>
-                    )}
+                    
+                    <div className="product-thumbnail-grid">
+                        {productImages.map(image => (
+                            <div key={image.id} className={`product-thumbnail ${image.isProcessed ? 'processed' : ''}`}>
+                                <img src={image.processedData ?? image.data} alt={image.originalName} />
+                                <button className="remove-thumbnail-button" onClick={(e) => {e.stopPropagation(); handleRemoveProductImage(image.id);}}>&times;</button>
+                                {(isRemovingBackground === image.id || !image.isProcessed) && (
+                                    <div className="product-thumbnail-overlay">
+                                        {isRemovingBackground === image.id ? (
+                                            <>
+                                                <div className="spinner-ui" style={{ borderTopColor: 'white', borderLeftColor: 'transparent', borderRightColor: 'transparent' }}></div>
+                                                <span>Processing...</span>
+                                            </>
+                                        ) : (
+                                            <div className="thumbnail-actions">
+                                                <button onClick={() => handleReprocessImage(image.id)}>Process</button>
+                                                <button onClick={() => handleSkipProcessing()}>Skip</button>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                    
                 </div>
             )}
 
-            {productImages.some(img => img.isProcessed) && (
+            {currentStep >= 3 && productImages.some(img => img.isProcessed) && (
                 <div className="card">
                     <StepIndicator step={3} title="Choose Visual Style" active={currentStep >= 3} />
-                    {currentStep >= 3 && !selectedStyle && (
+                    {!selectedStyle ? (
                         <>
                             <p className="step-subtitle">Select a style to define the overall look and feel of your product images.</p>
                             <div className="style-grid">
@@ -1037,21 +1129,20 @@ const handleEditWithPreset = useCallback(async (preset: string) => {
                                 ))}
                             </div>
                         </>
-                    )}
-                    {selectedStyle && (
+                    ) : (
                         <div className="selected-summary">
                             <h3>{selectedStyle.name}</h3>
                             <p>{selectedStyle.description}</p>
-                            <button className="change-button" onClick={() => performProjectUpdate(p => ({ ...p, selectedStyle: null }))}>Change Style</button>
+                            <button className="change-button" onClick={handleChangeStyle}>Change Style</button>
                         </div>
                     )}
                 </div>
             )}
 
-            {selectedStyle && (
+            {currentStep >= 4 && selectedStyle && (
                 <div className="card">
                     <StepIndicator step={4} title="Select Backgrounds" active={currentStep >= 4} />
-                    {currentStep >= 4 && (
+                    
                         <>
                             <p className="step-subtitle">Choose from curated backgrounds or create your own to place your product in context.</p>
                             <div className="carousel-wrapper">
@@ -1097,15 +1188,33 @@ const handleEditWithPreset = useCallback(async (preset: string) => {
                                 <button className="add-button" onClick={handleAddCustomBackground} disabled={!customPrompt.trim()}>Add</button>
                             </div>
                         </>
-                    )}
+                    
                 </div>
             )}
             
-            {selectedBackgrounds.length > 0 && (
+            {currentStep >= 5 && selectedBackgrounds.length > 0 && (
                 <div className="card">
                 <StepIndicator step={5} title="Review & Generate" active={currentStep >= 5} />
-                    {currentStep >= 5 && (
+                    
                         <>
+                             <div className="presets-section">
+                                <h4>Save/Load Selections</h4>
+                                <div className="preset-controls">
+                                  <input type="text" value={presetName} onChange={e => setPresetName(e.target.value)} placeholder="Preset Name" />
+                                  <button onClick={handleSavePreset} disabled={!presetName.trim()}>Save</button>
+                                </div>
+                                {presets.length > 0 && <div className="preset-list">
+                                  {presets.map(p => (
+                                    <div key={p.name} className="preset-item">
+                                      <span>{p.name}</span>
+                                      <div className="preset-item-actions">
+                                        <button onClick={() => handleApplyPreset(p)}>Apply</button>
+                                        <button className="delete" onClick={() => handleDeletePreset(p.name)}>&times;</button>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>}
+                            </div>
                             <div className="review-list">
                                 {selectedBackgrounds.map(bg => (
                                     <div key={bg.id} className="review-item-wrapper">
@@ -1138,6 +1247,16 @@ const handleEditWithPreset = useCallback(async (preset: string) => {
                                                         </div>
                                                     </div>
                                                 ))}
+                                                <div className="direction-category smart-color-category">
+                                                  <div className="toggle-switch-container">
+                                                    <label className="toggle-switch">
+                                                      <input type="checkbox" checked={bg.matchPalette} onChange={(e) => handleUpdateMatchPalette(bg.id, e.target.checked)} />
+                                                      <span className="slider round"></span>
+                                                    </label>
+                                                    <span>Smart Color Matching</span>
+                                                  </div>
+                                                  <p className="direction-description">Harmonize background colors with your product's color palette for a cohesive look.</p>
+                                                </div>
                                                 <div className="direction-category">
                                                   <h4>Negative Prompt</h4>
                                                   <p className="direction-description">Describe elements to avoid in the generation (e.g., "text, watermarks, people").</p>
@@ -1155,9 +1274,13 @@ const handleEditWithPreset = useCallback(async (preset: string) => {
                                 ))}
                             </div>
                             <div className="generate-section">
-                                <div className={`total-images-indicator ${totalImageCount > 100 ? 'limit-exceeded' : ''}`}>
-                                    Total Images to Generate: {totalImageCount}
+                                <div className="review-actions">
+                                    <div className={`total-images-indicator ${totalImageCount > 100 ? 'limit-exceeded' : ''}`}>
+                                        Total Images to Generate: {totalImageCount}
+                                    </div>
+                                    <button className="clear-button" onClick={handleClearBackgrounds}>Clear All</button>
                                 </div>
+
                                 <button
                                     className="generate-button"
                                     onClick={handleGenerate}
@@ -1168,7 +1291,7 @@ const handleEditWithPreset = useCallback(async (preset: string) => {
                                 {totalImageCount > 100 && <p className="error" style={{padding: '0.5rem', marginTop: '0.5rem'}}>Please reduce the total number of images to 100 or less.</p>}
                             </div>
                         </>
-                    )}
+                    
                 </div>
             )}
             
@@ -1207,27 +1330,33 @@ const handleEditWithPreset = useCallback(async (preset: string) => {
                                                 </div>
                                             ) : (
                                                 <div className="result-image-overlay">
-                                                    <button className="overlay-edit-button" onClick={(e) => { e.stopPropagation(); setEditingImage(image); }}>
-                                                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path d="m11.43 2.232 7.336 7.336a1.25 1.25 0 0 1 0 1.768l-1.318 1.318a1.25 1.25 0 0 1-1.768 0L8.347 5.321a1.25 1.25 0 0 1 0-1.768l1.318-1.318a1.25 1.25 0 0 1 1.767 0Zm-2.318 8.11-7.057 7.057a1.25 1.25 0 0 1-.884.364H.75a.75.75 0 0 1-.75-.75v-2.34a1.25 1.25 0 0 1 .364-.884l7.057-7.057a1.25 1.25 0 0 1 1.768 0l1.318 1.318a1.25 1.25 0 0 1 0 1.768L9.112 10.34Z"/></svg>
-                                                        Edit
+                                                    <button className="overlay-edit-button" onClick={(e) => { e.stopPropagation(); handleEditImage(image); }}>
+                                                      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                                                      Edit
                                                     </button>
                                                     <div className="overlay-actions-corner">
-                                                        <div className="tooltip-wrapper">
-                                                            <button className="overlay-icon-button" onClick={(e) => { e.stopPropagation(); handleUpscale(image.id); }} disabled={upscalingId === image.id}>
-                                                                {upscalingId === image.id ? <div className="spinner-ui"></div> : <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" /></svg>}
-                                                            </button>
-                                                            <span className="tooltip">Upscale</span>
-                                                        </div>
-                                                        <div className="tooltip-wrapper">
-                                                            <button className="overlay-icon-button" onClick={(e) => { e.stopPropagation(); handleGenerateVariations(image.id); }} disabled={!!variationsLoadingId}>
-                                                                {variationsLoadingId === image.id ? <div className="spinner-ui"></div> : <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 0 0-3.7-3.7 48.678 48.678 0 0 0-7.324 0 4.006 4.006 0 0 0-3.7 3.7c-.092 1.21-.138 2.43-.138 3.662s.046 2.453.138 3.662a4.006 4.006 0 0 0 3.7 3.7 48.656 48.656 0 0 0 7.324 0 4.006 4.006 0 0 0 3.7-3.7c.092-1.21.138 2.43.138-3.662Z" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /></svg>}
-                                                            </button>
-                                                            <span className="tooltip">Variations</span>
-                                                        </div>
+                                                      <div className="tooltip-wrapper">
+                                                        <button className="overlay-icon-button" aria-label="Upscale" onClick={(e) => { e.stopPropagation(); handleUpscale(image.id); }} disabled={!!upscalingId}>
+                                                            {upscalingId === image.id ? <div className="spinner-dark"></div> : <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6"/><path d="m12 12 7.5 7.5M16 12h3.5v3.5"/></svg>}
+                                                        </button>
+                                                        <span className="tooltip">Upscale</span>
+                                                      </div>
+                                                      <div className="tooltip-wrapper">
+                                                        <button className="overlay-icon-button" aria-label="Generate Variations" onClick={(e) => { e.stopPropagation(); handleGenerateVariations(image.id); }} disabled={!!variationsLoadingId}>
+                                                            {variationsLoadingId === image.id ? <div className="spinner-dark"></div> : <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12h8"/><path d="M12 8v8"/></svg>}
+                                                        </button>
+                                                        <span className="tooltip">Variations</span>
+                                                      </div>
+                                                      <div className="tooltip-wrapper">
+                                                        <button className="overlay-icon-button" aria-label="Download" onClick={(e) => { e.stopPropagation(); handleDownloadImage(image); }}>
+                                                            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                                        </button>
+                                                        <span className="tooltip">Download</span>
+                                                      </div>
                                                     </div>
                                                 </div>
                                             )}
-                                             {(isGeneratingFill || upscalingId === image.id || variationsLoadingId === image.id || image.isGeneratingVideo) && (
+                                             {(isReimagining || upscalingId === image.id || variationsLoadingId === image.id || image.isGeneratingVideo) && (
                                                 <div className="processing-overlay">
                                                     <div className="spinner-ui"></div>
                                                     <span>{image.isGeneratingVideo ? "Animating..." : "Processing..."}</span>
@@ -1289,29 +1418,29 @@ const handleEditWithPreset = useCallback(async (preset: string) => {
                   )}
                 </div>
                 <div className="full-preview-actions">
-                    <button onClick={() => handleDownloadImage(fullPreviewImage)}>
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path d="M10.75 2.75a.75.75 0 0 0-1.5 0v8.614L6.295 8.235a.75.75 0 1 0-1.09 1.03l4.25 4.5a.75.75 0 0 0 1.09 0l4.25-4.5a.75.75 0 0 0-1.09-1.03l-2.955 3.129V2.75Z" /><path d="M3.5 12.75a.75.75 0 0 0-1.5 0v2.5A2.75 2.75 0 0 0 4.75 18h10.5A2.75 2.75 0 0 0 18 15.25v-2.5a.75.75 0 0 0-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5Z" /></svg>
-                        Download
+                    <button onClick={() => { handleEditImage(fullPreviewImage); setFullPreviewImage(null); }} disabled={!!fullPreviewImage.videoUrl}>
+                      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                      <span>Edit</span>
                     </button>
-                    <button onClick={() => { setEditingImage(fullPreviewImage); setFullPreviewImage(null); }} disabled={!!fullPreviewImage.videoUrl}>
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path d="m11.43 2.232 7.336 7.336a1.25 1.25 0 0 1 0 1.768l-1.318 1.318a1.25 1.25 0 0 1-1.768 0L8.347 5.321a1.25 1.25 0 0 1 0-1.768l1.318-1.318a1.25 1.25 0 0 1 1.767 0Zm-2.318 8.11-7.057 7.057a1.25 1.25 0 0 1-.884.364H.75a.75.75 0 0 1-.75-.75v-2.34a1.25 1.25 0 0 1 .364-.884l7.057-7.057a1.25 1.25 0 0 1 1.768 0l1.318 1.318a1.25 1.25 0 0 1 0 1.768L9.112 10.34Z"/></svg>
-                        Edit
+                    <button onClick={() => {handleUpscale(fullPreviewImage.id); setFullPreviewImage(null);}} disabled={upscalingId === fullPreviewImage.id || !!fullPreviewImage.videoUrl}>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6"/><path d="m12 12 7.5 7.5M16 12h3.5v3.5"/></svg>
+                        <span>Upscale</span>
                     </button>
-                    <button onClick={() => handleUpscale(fullPreviewImage.id)} disabled={upscalingId === fullPreviewImage.id || !!fullPreviewImage.videoUrl}>
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm.75-11.25a.75.75 0 0 0-1.5 0v4.59L7.3 9.38a.75.75 0 0 0-1.1 1.04l3.25 3.5a.75.75 0 0 0 1.1 0l3.25-3.5a.75.75 0 1 0-1.1-1.04l-1.95 2.1V6.75Z" clipRule="evenodd" /></svg>
-                        Upscale
+                    <button onClick={() => {handleGenerateVariations(fullPreviewImage.id); setFullPreviewImage(null);}} disabled={!!variationsLoadingId || !!fullPreviewImage.videoUrl}>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12h8"/><path d="M12 8v8"/></svg>
+                        <span>Variations</span>
                     </button>
-                    <button onClick={() => handleGenerateVariations(fullPreviewImage.id)} disabled={!!variationsLoadingId || !!fullPreviewImage.videoUrl}>
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M4.25 2A2.25 2.25 0 0 0 2 4.25v11.5A2.25 2.25 0 0 0 4.25 18h11.5A2.25 2.25 0 0 0 18 15.75V4.25A2.25 2.25 0 0 0 15.75 2H4.25ZM3.5 4.25a.75.75 0 0 1 .75-.75h11.5a.75.75 0 0 1 .75.75v11.5a.75.75 0 0 1-.75.75H4.25a.75.75 0 0 1-.75-.75V4.25Z" clipRule="evenodd" /></svg>
-                        Variations
-                    </button>
-                    <button onClick={() => handleGenerateDetailedPromptForImage(fullPreviewImage, 'long')} disabled={!!fullPreviewImage.videoUrl}>
+                    <button onClick={() => { handleOpenPromptGenerator(fullPreviewImage); setFullPreviewImage(null); }} disabled={!!fullPreviewImage.videoUrl}>
                       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path d="M10.75 3.562a.75.75 0 0 0-1.5 0v1.438h-1.438a.75.75 0 0 0 0 1.5h1.438v1.438a.75.75 0 0 0 1.5 0V6.5h1.438a.75.75 0 0 0 0-1.5h-1.438V3.562ZM4.53 4.22a.75.75 0 0 0-1.06 0l-1.22 1.22a.75.75 0 0 0 0 1.06l4 4a.75.75 0 0 0 1.06 0l1.22-1.22a.75.75 0 0 0 0-1.06l-4-4ZM10 10.5a.75.75 0 0 1 .75-.75h5.5a.75.75 0 0 1 0 1.5h-5.5a.75.75 0 0 1-.75-.75Zm-5.28 2.53a.75.75 0 0 0-1.06 0l-1.22 1.22a.75.75 0 0 0 0 1.06l4 4a.75.75 0 0 0 1.06 0l1.22-1.22a.75.75 0 0 0 0-1.06l-4-4Z" /><path d="M10 14.5a.75.75 0 0 1 .75-.75h5.5a.75.75 0 0 1 0 1.5h-5.5A.75.75 0 0 1 10 14.5Z" /></svg>
-                      Get Prompt
+                      <span>Get Prompt</span>
                     </button>
-                    <button onClick={() => handleOpenAnimationModal(fullPreviewImage)} disabled={!!fullPreviewImage.videoUrl}>
+                    <button onClick={() => { handleOpenAnimationModal(fullPreviewImage); setFullPreviewImage(null); }} disabled={!!fullPreviewImage.videoUrl}>
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path d="M3.25 4A2.25 2.25 0 0 0 1 6.25v7.5A2.25 2.25 0 0 0 3.25 16h13.5A2.25 2.25 0 0 0 19 13.75v-7.5A2.25 2.25 0 0 0 16.75 4H3.25Z M13 10a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /></svg>
-                        Animate
+                        <span>Animate</span>
+                    </button>
+                    <button onClick={() => handleDownloadImage(fullPreviewImage)}>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                        <span>Download</span>
                     </button>
                 </div>
                 <button className="full-preview-close" onClick={() => setFullPreviewImage(null)}>&times;</button>
@@ -1320,16 +1449,94 @@ const handleEditWithPreset = useCallback(async (preset: string) => {
     )}
 
     {editingImage && (
-        <div className="edit-overlay" onClick={() => setEditingImage(null)}>
-            <div className="edit-modal" onClick={e => e.stopPropagation()}>
-                <div className="edit-preview">
-                    {/* Content for edit preview */}
-                </div>
-                <div className="edit-sidebar">
-                    {/* Content for edit sidebar */}
+      <div className="edit-overlay" onClick={handleCloseEditModal}>
+        <div className="edit-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="edit-preview">
+            <div className="edit-preview-wrapper">
+              <img
+                src={editingImage.data}
+                alt="Editing preview"
+                style={{
+                  transform: `scale(${previewZoom})`,
+                  filter: `brightness(${imageAdjustments.brightness}%) contrast(${imageAdjustments.contrast}%) saturate(${imageAdjustments.saturation}%)`,
+                }}
+              />
+            </div>
+          </div>
+          <div className="edit-sidebar">
+
+            <div className="edit-section">
+                <h4>Canvas & Zoom</h4>
+                <p>Pan and zoom to inspect details.</p>
+                <div className="zoom-controls">
+                    <button onClick={() => setPreviewZoom(z => Math.max(0.25, z - 0.25))} aria-label="Zoom out">-</button>
+                    <span>{Math.round(previewZoom * 100)}%</span>
+                    <button onClick={() => setPreviewZoom(z => Math.min(3, z + 0.25))} aria-label="Zoom in">+</button>
                 </div>
             </div>
+
+            <div className="edit-section">
+                <h4>AI Uncrop (Outpainting)</h4>
+                <p>Expand the image and let AI fill the new area.</p>
+                <div className="adjustment-item">
+                    <label htmlFor="outpaint-slider">Expansion Amount: {outpaintScale}%</label>
+                    <input
+                        id="outpaint-slider"
+                        type="range"
+                        min="100"
+                        max="200"
+                        step="10"
+                        value={outpaintScale}
+                        onChange={(e) => setOutpaintScale(Number(e.target.value))}
+                        className="adjustment-slider"
+                    />
+                </div>
+                <button onClick={handleUncrop} disabled={isUncropping || outpaintScale === 100} className="edit-section-action">
+                    {isUncropping ? <div className="spinner-dark"></div> : 'Apply Uncrop'}
+                </button>
+            </div>
+
+            <div className="edit-section">
+              <h4>AI Reimagine</h4>
+              <p>Describe changes to the image content, style, or lighting.</p>
+              <textarea
+                value={reimaginePrompt}
+                onChange={(e) => setReimaginePrompt(e.target.value)}
+                placeholder="e.g., 'make it night time with neon lights', 'change the background to a beach', 'add a small cat'"
+              />
+              <div className="preset-buttons-grid">
+                  {EDIT_PRESETS.Lighting.map(p => <button key={p} className="preset-button" onClick={() => setReimaginePrompt(val => `${val} ${p}`.trim())}>{p}</button>)}
+                  {EDIT_PRESETS["Time of Day"].map(p => <button key={p} className="preset-button" onClick={() => setReimaginePrompt(val => `${val} ${p}`.trim())}>{p}</button>)}
+              </div>
+              <button onClick={handleReimagine} disabled={isReimagining || !reimaginePrompt.trim()} className="edit-section-action">
+                {isReimagining ? <div className="spinner-dark"></div> : 'Reimagine'}
+              </button>
+            </div>
+
+            <div className="edit-section">
+              <h4>Adjustments</h4>
+              <div className="adjustment-item">
+                <label htmlFor="brightness">Brightness: {imageAdjustments.brightness}%</label>
+                <input id="brightness" type="range" min="50" max="150" value={imageAdjustments.brightness} onChange={(e) => setImageAdjustments(prev => ({ ...prev, brightness: Number(e.target.value) }))} className="adjustment-slider" />
+              </div>
+              <div className="adjustment-item">
+                <label htmlFor="contrast">Contrast: {imageAdjustments.contrast}%</label>
+                <input id="contrast" type="range" min="50" max="150" value={imageAdjustments.contrast} onChange={(e) => setImageAdjustments(prev => ({ ...prev, contrast: Number(e.target.value) }))} className="adjustment-slider" />
+              </div>
+              <div className="adjustment-item">
+                <label htmlFor="saturation">Saturation: {imageAdjustments.saturation}%</label>
+                <input id="saturation" type="range" min="0" max="200" value={imageAdjustments.saturation} onChange={(e) => setImageAdjustments(prev => ({ ...prev, saturation: Number(e.target.value) }))} className="adjustment-slider" />
+              </div>
+            </div>
+
+            <div className="edit-modal-actions">
+                <button className="preview-close-button" onClick={handleCloseEditModal}>Done</button>
+                <button className="preview-download-button" onClick={() => handleDownloadImage(editingImage)}>Download</button>
+            </div>
+
+          </div>
         </div>
+      </div>
     )}
 
     {showPromptGenerator && promptGeneratorImage && (
@@ -1342,17 +1549,35 @@ const handleEditWithPreset = useCallback(async (preset: string) => {
                         <img src={promptGeneratorImage.data} alt="Prompt inspiration" />
                     </div>
                     <div className="prompt-generator-controls">
-                        <div className="prompt-type-tabs">
-                           {/* Add tabs for different prompt types if needed */}
+                        <div className="prompt-generator-tabs">
+                            <div className="prompt-type-tabs">
+                                <button className={promptType === 'text' ? 'selected' : ''} onClick={() => setPromptType('text')}>Text-to-Image</button>
+                                <button className={promptType === 'video' ? 'selected' : ''} onClick={() => setPromptType('video')}>Text-to-Video</button>
+                            </div>
+                            <div className="prompt-view-tabs">
+                                <button className={promptView === 'text' ? 'selected' : ''} onClick={() => setPromptView('text')}>Text</button>
+                                <button className={promptView === 'json' ? 'selected' : ''} onClick={() => setPromptView('json')}>JSON</button>
+                            </div>
                         </div>
                         <div className="generated-prompt-wrapper">
-                            <textarea
-                                className="generated-prompt-output"
-                                value={isGeneratingPrompt ? 'Generating...' : generatedPrompt}
-                                readOnly
-                                placeholder="Generated prompt will appear here..."
-                            />
-                            <button className="copy-prompt-button" onClick={() => navigator.clipboard.writeText(generatedPrompt)}>Copy</button>
+                             {isGeneratingPrompt ? (
+                                <div className="loading-prompt"><div className="spinner-ui"></div>Generating...</div>
+                             ) : (
+                                <>
+                                {promptView === 'text' ? (
+                                    <textarea
+                                        className="generated-prompt-output"
+                                        value={generatedPrompt}
+                                        readOnly
+                                    />
+                                ) : (
+                                    <pre className="generated-prompt-output json-view">
+                                        <code>{generatedPromptJSON}</code>
+                                    </pre>
+                                )}
+                                <button className="copy-prompt-button" onClick={() => navigator.clipboard.writeText(promptView === 'text' ? generatedPrompt : generatedPromptJSON || '')}>Copy</button>
+                                </>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -1382,12 +1607,22 @@ const handleEditWithPreset = useCallback(async (preset: string) => {
                     </div>
                     <div className="animation-controls">
                         <h4>Animation Prompt</h4>
-                        <textarea
+                         <textarea
                             className="edit-sidebar-textarea"
                             value={animationPrompt}
                             onChange={(e) => setAnimationPrompt(e.target.value)}
                             placeholder="e.g., A gentle breeze, subtle camera pan to the right, falling snow..."
                         />
+                        <div className="animation-presets">
+                            <h4>Quick Selections</h4>
+                            <div className="animation-presets-grid">
+                                {ANIMATION_PRESETS.map(preset => (
+                                    <button key={preset.name} className="preset-button" onClick={() => setAnimationPrompt(preset.prompt)}>
+                                        {preset.name}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
                         <div className="animation-modal-actions">
                             <button
                                 className="edit-section-action"
